@@ -44,6 +44,7 @@ def run_main(
     world_size: Optional[int] = None,
     quantization_mode: Optional[str] = None,
 ):
+    print(ckpt_dir)
     generator = Llama3.build(
         ckpt_dir=ckpt_dir,
         max_seq_len=max_seq_len,
@@ -54,24 +55,27 @@ def run_main(
     )
 
     interleaved_contents = [
-        "The color of the sky is blue but sometimes it can also be",
-        """\
-apple is pomme,
-bannana is banane,
-cherry is""",
-        "1, 2, 3, 5, 8, 13",
-        "ba ba black sheep, have you any wool?",
+        "The president of the United States is",
+#        "The color of the sky is blue but sometimes it can also be",
+#        """\
+#apple is pomme,
+#bannana is banane,
+#cherry is""",
+#        "1, 2, 3, 5, 8, 13",
+#        "ba ba black sheep, have you any wool?",
     ]
-    if generator.args.vision_chunk_size > 0:
-        with open(THIS_DIR / "../../resources/dog.jpg", "rb") as f:
-            img = f.read()
+    print(f"chunk size: {generator.args.vision_chunk_size}")
 
-        interleaved_contents.append(
-            [
-                RawMediaItem(type="image", data=BytesIO(img)),
-                "If I had to write a haiku for this one",
-            ]
-        )
+#    if generator.args.vision_chunk_size > 0:
+#        with open(THIS_DIR / "../../resources/dog.jpg", "rb") as f:
+#            img = f.read()
+#
+#        interleaved_contents.append(
+#            [
+#                RawMediaItem(type="image", data=BytesIO(img)),
+#                "If I had to write a haiku for this one",
+#            ]
+#        )
 
     for content in interleaved_contents:
         cprint(f"{content}", end="")

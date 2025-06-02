@@ -162,8 +162,11 @@ class Llama3:
         print_model_input: bool = False,
         logits_processor: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
     ) -> Generator[List[GenerationResult], None, None]:
+        print("\n")
         if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.args.max_seq_len:
             max_gen_len = self.args.max_seq_len - 1
+        # (taeklim): Changed generation length
+        max_gen_len = 128
         params = self.model.params
 
         print_model_input = print_model_input or os.environ.get("LLAMA_MODELS_DEBUG", "0") == "1"
@@ -196,7 +199,10 @@ class Llama3:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
         is_vision = not isinstance(self.model, Transformer)
+
         if is_vision:
+            # (taeklim): Measuring vision encoder latency
+            start_vis = time.perf_counter()
             images = [inp.vision.images if inp.vision is not None else [] for inp in model_inputs]
             mask = [inp.vision.mask if inp.vision is not None else [] for inp in model_inputs]
 
@@ -206,6 +212,8 @@ class Llama3:
                 total_len=total_len,
                 device=tokens.device,
             )
+            end_vis = time.perf_counter()
+            cprint(f"visual encoder latency: {end_vis - start_vis}", "blue")
 
         eos_reached = torch.tensor([False] * bsz)
         input_text_mask = tokens != pad_id
@@ -230,6 +238,10 @@ class Llama3:
         stop_tokens = torch.tensor(self.tokenizer.stop_tokens)
 
         prev_pos = 0
+
+        # (taeklim): Measuring text generation latency
+        start_text = time.perf_counter()
+        #print(f"before forward {min_prompt_len}, {total_len}")
         for cur_pos in range(min_prompt_len, total_len):
             if is_vision:
                 position_ids = torch.arange(prev_pos, cur_pos, dtype=torch.long)
@@ -298,6 +310,10 @@ class Llama3:
             prev_pos = cur_pos
             if all(eos_reached):
                 break
+        end_text = time.perf_counter()
+        cprint(f"\ntext gen latency: {end_text - start_text}", "blue")
+
+
 
     def completion(
         self,

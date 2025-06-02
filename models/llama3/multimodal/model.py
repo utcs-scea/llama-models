@@ -1052,6 +1052,7 @@ class CrossAttentionTransformerVision(torch.nn.Module):
         )
 
     def forward(self, images: torch.Tensor, aspect_ratios: torch.Tensor) -> torch.Tensor:
+        print("vision forward")
         # vision_tokens: (B, T, D)
         # aspect_ratios: (B, T)
         # h: (B, T, D)

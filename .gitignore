@@ -1,3 +1,8 @@
+*.sw*
+*.out
+*.files
+tags
+
 __pycache__
 dist
 *.egg-info
