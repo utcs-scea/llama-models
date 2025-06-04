@@ -59,6 +59,9 @@ class ModelArgs:
     quantization_args: Optional[QuantizationArgs] = None
     lora_args: Optional[LoRAArgs] = None
 
+    # (taeklim)
+    vision_only: bool = False
+
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
             if k == "lora_args":

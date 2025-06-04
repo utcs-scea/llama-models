@@ -2,6 +2,7 @@
 *.out
 *.files
 tags
+.nfs*
 
 __pycache__
 dist

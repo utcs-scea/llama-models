@@ -2,8 +2,8 @@
 
 NGPUS=1
 CHECKPOINT_DIR=~/.llama/checkpoints/Llama3.2-11B-Vision
-#CHECKPOINT_DIR=~/.llama/checkpoints/Llama3.1-8B
+
 PYTHONPATH=$(git rev-parse --show-toplevel) \
   torchrun --nproc_per_node=$NGPUS \
-  -m models.llama3.scripts.completion $CHECKPOINT_DIR \
+  -m models.llama3.scripts.mp_completion $CHECKPOINT_DIR \
   --world_size $NGPUS

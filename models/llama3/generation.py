@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 from packaging import version
-from typing import Callable, Generator, List, Optional
+from typing import Callable, Generator, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -46,6 +46,7 @@ class Llama3:
         quantization_mode: Optional[QuantizationMode] = None,
         seed: int = 1,
         device: str = "cuda",
+        vision_only: bool = False,
     ):
         device = torch.device(device)
         if (
@@ -71,7 +72,10 @@ class Llama3:
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         if device.type == "cuda":
-            torch.cuda.set_device(local_rank)
+            if not vision_only:
+                torch.cuda.set_device(1)
+            else:
+                torch.cuda.set_device(local_rank)
         elif device.type == "xpu":
             torch.xpu.set_device(local_rank)
 
@@ -85,12 +89,17 @@ class Llama3:
         ckpt_paths = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(ckpt_paths) > 0, f"no checkpoint files found in {ckpt_dir}"
         print(f"Loading a checkpoint (shards={len(ckpt_paths)}, current-mp-size={world_size})")
+        print(f"ckpt_dir: {ckpt_dir}")
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
+
+        if vision_only:
+            print("vision_only")
 
         model_args: ModelArgs = ModelArgs(
             max_seq_len=max_seq_len,
             max_batch_size=max_batch_size,
+            vision_only=vision_only,
             **params,
         )
         tokenizer = Tokenizer.get_instance()
@@ -105,7 +114,9 @@ class Llama3:
         def build_model():
             if model_args.vision_chunk_size > 0:
                 model = CrossAttentionTransformer(model_args)
-                model.setup_cache(model_args.max_batch_size, device=device, dtype=torch.get_default_dtype())
+                if not vision_only:
+                    print(f"setup_cache, {vision_only}")
+                    model.setup_cache(model_args.max_batch_size, device=device, dtype=torch.get_default_dtype())
             else:
                 model = Transformer(model_args)
             return model
@@ -150,6 +161,215 @@ class Llama3:
         self.tokenizer = tokenizer
         self.formatter = ChatFormat(tokenizer)
 
+
+    @torch.inference_mode()
+    def vision_generate(
+        self,
+        model_inputs: List[LLMInput],
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        max_gen_len: Optional[int] = None,
+        logprobs: bool = False,
+        echo: bool = False,
+        print_model_input: bool = False,
+        logits_processor: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+    #) -> Generator[List[GenerationResult], None, None]:
+    ):
+        if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.args.max_seq_len:
+            max_gen_len = self.args.max_seq_len - 1
+        # (taeklim): Changed generation length
+        max_gen_len = 128
+        params = self.model.params
+
+        prompt_tokens = [inp.tokens for inp in model_inputs]
+
+        bsz = len(model_inputs)
+        assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
+
+        min_prompt_len = min(len(t) for t in prompt_tokens)
+        max_prompt_len = max(len(t) for t in prompt_tokens)
+
+        if max_prompt_len >= params.max_seq_len:
+            cprint(f"Out of token budget {max_prompt_len} vs {params.max_seq_len}", "red")
+            return
+
+        total_len = min(max_gen_len + max_prompt_len, params.max_seq_len)
+
+        pad_id = self.tokenizer.pad_id
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long)
+        for k, t in enumerate(prompt_tokens):
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long)
+        if logprobs:
+            token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
+
+        is_vision = not isinstance(self.model, Transformer)
+
+        if is_vision:
+            # (taeklim): Measuring vision encoder latency
+            start_vis = time.perf_counter()
+            images = [inp.vision.images if inp.vision is not None else [] for inp in model_inputs]
+            mask = [inp.vision.mask if inp.vision is not None else [] for inp in model_inputs]
+
+            xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = self.model.compute_vision_tokens_masks(
+                batch_images=images,
+                batch_masks=mask,
+                total_len=total_len,
+                device=tokens.device,
+            )
+            end_vis = time.perf_counter()
+            cprint(f"visual encoder latency: {end_vis - start_vis}", "blue")
+            return xattn_caches, cross_attention_masks, full_text_row_masked_out_mask
+        else:
+            cprint(f"Need to be vision")
+            exit(0)
+
+
+    @torch.inference_mode()
+    def text_generate(
+        self,
+        model_inputs: List[LLMInput],
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        max_gen_len: Optional[int] = None,
+        logprobs: bool = False,
+        echo: bool = False,
+        print_model_input: bool = False,
+        logits_processor: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
+        interm_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor] = None,
+    #) -> Generator[List[GenerationResult], None, None]:
+    ):
+        if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.args.max_seq_len:
+            max_gen_len = self.args.max_seq_len - 1
+        # (taeklim): Changed generation length
+        max_gen_len = 128
+        params = self.model.params
+
+        prompt_tokens = [inp.tokens for inp in model_inputs]
+
+        bsz = len(model_inputs)
+        assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
+
+        min_prompt_len = min(len(t) for t in prompt_tokens)
+        max_prompt_len = max(len(t) for t in prompt_tokens)
+
+        if max_prompt_len >= params.max_seq_len:
+            cprint(f"Out of token budget {max_prompt_len} vs {params.max_seq_len}", "red")
+            return
+
+        total_len = min(max_gen_len + max_prompt_len, params.max_seq_len)
+
+        pad_id = self.tokenizer.pad_id
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long)
+        for k, t in enumerate(prompt_tokens):
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long)
+        if logprobs:
+            token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
+
+        is_vision = not isinstance(self.model, Transformer)
+
+#        if is_vision:
+#            # (taeklim): Measuring vision encoder latency
+#            start_vis = time.perf_counter()
+#            images = [inp.vision.images if inp.vision is not None else [] for inp in model_inputs]
+#            mask = [inp.vision.mask if inp.vision is not None else [] for inp in model_inputs]
+#
+#            xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = self.model.compute_vision_tokens_masks(
+#                batch_images=images,
+#                batch_masks=mask,
+#                total_len=total_len,
+#                device=tokens.device,
+#            )
+#            end_vis = time.perf_counter()
+#            cprint(f"visual encoder latency: {end_vis - start_vis}", "blue")
+
+        xattn_caches = interm_data[0]
+        cross_attention_masks = interm_data[1]
+        full_text_row_masked_out_mask = interm_data[2]
+
+        eos_reached = torch.tensor([False] * bsz)
+        input_text_mask = tokens != pad_id
+
+        stop_tokens = torch.tensor(self.tokenizer.stop_tokens)
+
+        prev_pos = 0
+
+        # (taeklim): Measuring text generation latency
+        start_text = time.perf_counter()
+        #print(f"before forward {min_prompt_len}, {total_len}")
+        results = []
+        for cur_pos in range(min_prompt_len, total_len):
+            if is_vision:
+                position_ids = torch.arange(prev_pos, cur_pos, dtype=torch.long)
+                text_only_inference = all(inp.vision is None for inp in model_inputs)
+                print(position_ids)
+                logits = self.model.forward(
+                    position_ids,
+                    tokens,
+                    cross_attention_masks,
+                    full_text_row_masked_out_mask,
+                    xattn_caches,
+                    text_only_inference,
+                )
+            else:
+                logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+
+            if logits_processor is not None:
+                logits = logits_processor(tokens[:, :cur_pos], logits)
+
+            if temperature > 0:
+                probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
+                next_token = sample_top_p(probs, top_p)
+            else:
+                next_token = torch.argmax(logits[:, -1], dim=-1)
+
+            next_token = next_token.reshape(-1)
+            # only replace token if prompt has already been generated
+            next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+            tokens[:, cur_pos] = next_token
+
+            target = tokens[:, prev_pos + 1 : cur_pos + 1]
+            if is_vision:
+                # the logits space (num_classes) is designed to never contain a media_token
+                # however our input token stream does contain them. we need to nuke them here
+                # or else the CUDA kernels will crash with an illegal memory access
+                vision_tokens = [self.tokenizer.special_tokens["<|image|>"], 128256]
+                masks = [target.eq(t) for t in vision_tokens]
+                if len(masks) > 1:
+                    mask = torch.logical_or(*masks)
+                else:
+                    mask = masks[0]
+                target[mask] = 0
+
+            if logprobs:
+                token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
+                    input=logits.transpose(1, 2),
+                    target=target,
+                    reduction="none",
+                    ignore_index=pad_id,
+                )
+            eos_reached |= (~input_text_mask[:, cur_pos]) & (torch.isin(next_token, stop_tokens))
+            for idx, t in enumerate(next_token):
+                results.append(
+                    GenerationResult(
+                        token=t.item(),
+                        text=self.tokenizer.decode([t.item()]),
+                        source="output",
+                        logprobs=(token_logprobs[idx, cur_pos : cur_pos + 1].tolist() if logprobs else None),
+                        batch_idx=idx,
+                        finished=eos_reached[idx],
+                        ignore_token=cur_pos < len(prompt_tokens[idx]),
+                    )
+                )
+
+            prev_pos = cur_pos
+            if all(eos_reached):
+                break
+        end_text = time.perf_counter()
+        cprint(f"\ntext gen latency: {end_text - start_text}", "blue")
+
+        return results
+
+
     @torch.inference_mode()
     def generate(
         self,
@@ -161,22 +381,14 @@ class Llama3:
         echo: bool = False,
         print_model_input: bool = False,
         logits_processor: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
-    ) -> Generator[List[GenerationResult], None, None]:
-        print("\n")
+    #) -> Generator[List[GenerationResult], None, None]:
+    ):
         if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.args.max_seq_len:
             max_gen_len = self.args.max_seq_len - 1
         # (taeklim): Changed generation length
         max_gen_len = 128
         params = self.model.params
 
-        print_model_input = print_model_input or os.environ.get("LLAMA_MODELS_DEBUG", "0") == "1"
-        if print_model_input:
-            for inp in model_inputs:
-                tokens_to_print = [self.formatter.vision_token if t == 128256 else t for t in inp.tokens]
-                cprint(
-                    "Input to model:\n" + self.tokenizer.decode(tokens_to_print) + "\n",
-                    "red",
-                )
         prompt_tokens = [inp.tokens for inp in model_inputs]
 
         bsz = len(model_inputs)
@@ -218,23 +430,6 @@ class Llama3:
         eos_reached = torch.tensor([False] * bsz)
         input_text_mask = tokens != pad_id
 
-        if echo:
-            for i in range(max_prompt_len):
-                results = []
-                for j, t in enumerate(tokens[:, i]):
-                    results.append(
-                        GenerationResult(
-                            token=t.item(),
-                            text=self.tokenizer.decode([t.item()]),
-                            source="input",
-                            logprobs=(token_logprobs[j, i : i + 1].tolist() if logprobs else None),
-                            batch_idx=j,
-                            finished=False,
-                            ignore_token=t.item() == pad_id,
-                        )
-                    )
-                yield results
-
         stop_tokens = torch.tensor(self.tokenizer.stop_tokens)
 
         prev_pos = 0
@@ -242,6 +437,7 @@ class Llama3:
         # (taeklim): Measuring text generation latency
         start_text = time.perf_counter()
         #print(f"before forward {min_prompt_len}, {total_len}")
+        results = []
         for cur_pos in range(min_prompt_len, total_len):
             if is_vision:
                 position_ids = torch.arange(prev_pos, cur_pos, dtype=torch.long)
@@ -292,7 +488,6 @@ class Llama3:
                     ignore_index=pad_id,
                 )
             eos_reached |= (~input_text_mask[:, cur_pos]) & (torch.isin(next_token, stop_tokens))
-            results = []
             for idx, t in enumerate(next_token):
                 results.append(
                     GenerationResult(
@@ -305,7 +500,6 @@ class Llama3:
                         ignore_token=cur_pos < len(prompt_tokens[idx]),
                     )
                 )
-            yield results
 
             prev_pos = cur_pos
             if all(eos_reached):
@@ -313,7 +507,53 @@ class Llama3:
         end_text = time.perf_counter()
         cprint(f"\ntext gen latency: {end_text - start_text}", "blue")
 
+        return results
 
+
+    def vision_completion(
+        self,
+        contents: List[RawContent],
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        max_gen_len: Optional[int] = None,
+        logprobs: bool = False,
+        echo: bool = False,
+    #) -> Generator[List[GenerationResult], None, None]:
+    ):
+        model_inputs = [self.formatter.encode_content(c) for c in contents]
+        xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = self.vision_generate(
+            model_inputs=model_inputs,
+            temperature=temperature,
+            top_p=top_p,
+            max_gen_len=max_gen_len,
+            logprobs=logprobs,
+            echo=echo,
+        )
+        return xattn_caches, cross_attention_masks, full_text_row_masked_out_mask 
+
+
+    def text_completion(
+        self,
+        contents: List[RawContent],
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        max_gen_len: Optional[int] = None,
+        logprobs: bool = False,
+        echo: bool = False,
+        interm_data: Tuple[torch.Tensor, torch.Tensor, torch.Tensor] = None,
+    #) -> Generator[List[GenerationResult], None, None]:
+    ):
+        model_inputs = [self.formatter.encode_content(c) for c in contents]
+        result = self.text_generate(
+            model_inputs=model_inputs,
+            temperature=temperature,
+            top_p=top_p,
+            max_gen_len=max_gen_len,
+            logprobs=logprobs,
+            echo=echo,
+            interm_data=interm_data,
+        )
+        return result
 
     def completion(
         self,
@@ -323,19 +563,31 @@ class Llama3:
         max_gen_len: Optional[int] = None,
         logprobs: bool = False,
         echo: bool = False,
-    ) -> Generator[List[GenerationResult], None, None]:
+    #) -> Generator[List[GenerationResult], None, None]:
+    ):
         model_inputs = [self.formatter.encode_content(c) for c in contents]
-        for result in self.generate(
+        result = self.generate(
             model_inputs=model_inputs,
             temperature=temperature,
             top_p=top_p,
             max_gen_len=max_gen_len,
             logprobs=logprobs,
             echo=echo,
-        ):
-            yield result
-            if all(r.finished for r in result):
-                break
+        )
+        return result
+
+#        for result in self.generate(
+#            model_inputs=model_inputs,
+#            temperature=temperature,
+#            top_p=top_p,
+#            max_gen_len=max_gen_len,
+#            logprobs=logprobs,
+#            echo=echo,
+#        ):
+#            yield result
+#            if all(r.finished for r in result):
+#                break
+
 
     def chat_completion(
         self,
