@@ -267,24 +267,10 @@ class Llama3:
 
         is_vision = not isinstance(self.model, Transformer)
 
-#        if is_vision:
-#            # (taeklim): Measuring vision encoder latency
-#            start_vis = time.perf_counter()
-#            images = [inp.vision.images if inp.vision is not None else [] for inp in model_inputs]
-#            mask = [inp.vision.mask if inp.vision is not None else [] for inp in model_inputs]
-#
-#            xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = self.model.compute_vision_tokens_masks(
-#                batch_images=images,
-#                batch_masks=mask,
-#                total_len=total_len,
-#                device=tokens.device,
-#            )
-#            end_vis = time.perf_counter()
-#            cprint(f"visual encoder latency: {end_vis - start_vis}", "blue")
-
-        xattn_caches = interm_data[0]
-        cross_attention_masks = interm_data[1]
-        full_text_row_masked_out_mask = interm_data[2]
+        # (taeklim): vision caches from image encoder
+        xattn_caches = interm_data[0].to("cuda:1")
+        cross_attention_masks = interm_data[1].to("cuda:1")
+        full_text_row_masked_out_mask = interm_data[2].to("cuda:1")
 
         eos_reached = torch.tensor([False] * bsz)
         input_text_mask = tokens != pad_id
@@ -301,7 +287,6 @@ class Llama3:
             if is_vision:
                 position_ids = torch.arange(prev_pos, cur_pos, dtype=torch.long)
                 text_only_inference = all(inp.vision is None for inp in model_inputs)
-                print(position_ids)
                 logits = self.model.forward(
                     position_ids,
                     tokens,
