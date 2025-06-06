@@ -24,8 +24,6 @@ import torch
 
 from torch.multiprocessing import Process, set_start_method
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
 THIS_DIR = Path(__file__).parent
 
 
@@ -45,6 +43,7 @@ def run_main(
     top_p: float = 0.9,
     max_seq_len: int = 512,
     max_batch_size: int = 4,
+    request_len: int = 50,
     world_size: Optional[int] = None,
     quantization_mode: Optional[str] = None,
 ):
@@ -57,35 +56,38 @@ def run_main(
         device=get_device(),
     )
 
-    interleaved_contents = [
-        "The president of the United States is",
-    ]
-    print(generator.args.vision_chunk_size)
-#    if generator.args.vision_chunk_size > 0:
-#        with open(THIS_DIR / "../../resources/dog.jpg", "rb") as f:
-#            img = f.read()
-#
-#        interleaved_contents.append(
-#            [
-#                RawMediaItem(type="image", data=BytesIO(img)),
-#                "If I had to write a haiku for this one",
-#            ]
-#        )
+    interleaved_contents = []
+    if generator.args.vision_chunk_size > 0:
+        with open(THIS_DIR / "../../resources/dog.jpg", "rb") as f:
+            img = f.read()
+
+        for i in range (request_len):
+            interleaved_contents.append(
+                [
+                    RawMediaItem(type="image", data=BytesIO(img)),
+                    "If I had to write a haiku for this one",
+                ]
+            )
+    assert(len(interleaved_contents) == request_len)
+    total_vis_time = 0
+    total_text_time = 0
 
     for content in interleaved_contents:
-        cprint(f"{content}", end="")
+        #cprint(f"{content}", end="")
         batch = [content]
 
-        results = generator.completion(
+        vis_time, text_time, results = generator.completion(
             batch,
             temperature=temperature,
             top_p=top_p,
         )
-
+        total_vis_time += vis_time
+        total_text_time += text_time
 #        for token_result in results:
 #            cprint(token_result.text, color="yellow", end="")
-        print("\n==================================\n")
-
+    print(f"Average vision latency {total_vis_time / request_len:.3f} sec")
+    print(f"Average text latency {total_text_time / request_len:.3f} sec")
+        
 
 def main():
     fire.Fire(run_main)

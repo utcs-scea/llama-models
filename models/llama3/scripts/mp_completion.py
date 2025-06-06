@@ -54,6 +54,7 @@ def run_vision(
     top_p: float = 0.9,
     max_seq_len: int = 512,
     max_batch_size: int = 4,
+    request_len: int = 50,
     world_size: Optional[int] = None,
     quantization_mode: Optional[str] = None,
     queue=None,
@@ -69,24 +70,28 @@ def run_vision(
         vision_only=vision_only,
     )
 
+    time.sleep(10)
     interleaved_contents = []
-    print(generator.args.vision_chunk_size)
     if generator.args.vision_chunk_size > 0:
         with open(THIS_DIR / "../../resources/dog.jpg", "rb") as f:
             img = f.read()
 
-        interleaved_contents.append(
-                [
-                RawMediaItem(type="image", data=BytesIO(img)),
-                "If I had to write a haiku for this one",
-                ]
-            )
+        for i in range (request_len):
+            interleaved_contents.append(
+                    [
+                    RawMediaItem(type="image", data=BytesIO(img)),
+                    "If I had to write a haiku for this one",
+                    ]
+                )
+    assert(len(interleaved_contents) == request_len)
 
+    total_vis_time = 0
+    num_done = 0
     for content in interleaved_contents:
-        cprint(f"{content}", end="")
+        #cprint(f"{content}", end="")
         batch = [content]
 
-        xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = generator.vision_completion(
+        vis_time, xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = generator.vision_completion(
             batch,
             temperature=temperature,
             top_p=top_p,
@@ -94,12 +99,14 @@ def run_vision(
         interm_data = (xattn_caches, cross_attention_masks,
                        full_text_row_masked_out_mask)
         queue.put(interm_data)
-        print(f"proc1: {queue.qsize()}")
-        print("\n==================================\n")
+        total_vis_time += vis_time
+        num_done += 1
+        print(f"Req {num_done}, Cur vision latency {vis_time:.3f} sec, Avg vision latency {total_vis_time / num_done:.3f} sec")
 
-    while True:
+    while running:
+        # Waiting until 
         time.sleep(1)
-    print("Done")
+    print(f"Average vision latency {total_vis_time / request_len:.3f} sec")
 
 
 def run_text(
@@ -108,6 +115,7 @@ def run_text(
     top_p: float = 0.9,
     max_seq_len: int = 512,
     max_batch_size: int = 4,
+    request_len: int = 50,
     world_size: Optional[int] = None,
     quantization_mode: Optional[str] = None,
     queue=None,
@@ -128,30 +136,39 @@ def run_text(
         with open(THIS_DIR / "../../resources/dog.jpg", "rb") as f:
             img = f.read()
 
-        interleaved_contents.append(
-            [
-                RawMediaItem(type="image", data=BytesIO(img)),
-                "If I had to write a haiku for this one",
-            ]
-        )
-    while True:
-        if queue.qsize() == 1:
-            break
-    interm_data = queue.get()
-    print(f"proc2: {queue.qsize()}")
-    for content in interleaved_contents:
-        cprint(f"{content}", end="")
-        batch = [content]
+        for i in range (request_len):
+            interleaved_contents.append(
+                [
+                    RawMediaItem(type="image", data=BytesIO(img)),
+                    "If I had to write a haiku for this one",
+                ]
+            )
+    assert(len(interleaved_contents) == request_len)
 
-        results = generator.text_completion(
-            batch,
-            temperature=temperature,
-            top_p=top_p,
-            interm_data=interm_data,
-        )
-        for token_result in results:
-            cprint(token_result.text, color="yellow", end="")
-        print("\n==================================\n")
+    num_done = 0
+    total_text_time = 0
+    while True:
+        if queue.qsize(): 
+            interm_data = queue.get()
+            content = interleaved_contents[num_done]
+            batch = [content]
+
+            text_time, results = generator.text_completion(
+                batch,
+                temperature=temperature,
+                top_p=top_p,
+                interm_data=interm_data,
+            )
+            num_done += 1
+            total_text_time += text_time
+            del interm_data
+            print(f"Req {num_done}, Cur text lat {text_time:.3f} sec, Avg text lat {total_text_time / num_done:.3f} sec")
+        if num_done == request_len:
+            break
+
+#        for token_result in results:
+#            cprint(token_result.text, color="yellow", end="")
+    print(f"Average text latency {total_text_time / request_len:.3f} sec")
 
 
 def main():
@@ -163,11 +180,10 @@ def main():
     q = Queue()
 
     p1 = Process(target=run_vision,
-                kwargs={'ckpt_dir': '/home/tkim/.llama/checkpoints/Llama3.2-11B-Vision',
-                # kwargs={'ckpt_dir': '/home/tkim/.llama/checkpoints/Llama3.1-8B',
+                kwargs={'ckpt_dir': '/home/kimtaekl/.llama/checkpoints/Llama3.2-11B-Vision',
                          'queue': q})
     p2 = Process(target=run_text,
-                kwargs={'ckpt_dir': '/home/tkim/.llama/checkpoints/Llama3.2-11B-Vision',
+                kwargs={'ckpt_dir': '/home/kimtaekl/.llama/checkpoints/Llama3.2-11B-Vision',
                          'queue': q})
     p1.start()
     p2.start()

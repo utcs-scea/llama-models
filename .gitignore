@@ -1,6 +1,7 @@
 *.sw*
 *.out
 *.files
+*.log
 tags
 .nfs*
 

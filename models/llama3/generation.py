@@ -73,7 +73,8 @@ class Llama3:
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         if device.type == "cuda":
             if not vision_only:
-                torch.cuda.set_device(1)
+                #torch.cuda.set_device(1)
+                torch.cuda.set_device(local_rank)
             else:
                 torch.cuda.set_device(local_rank)
         elif device.type == "xpu":
@@ -87,14 +88,12 @@ class Llama3:
         start_time = time.time()
 
         ckpt_paths = sorted(Path(ckpt_dir).glob("*.pth"))
+        print(ckpt_dir)
         assert len(ckpt_paths) > 0, f"no checkpoint files found in {ckpt_dir}"
         print(f"Loading a checkpoint (shards={len(ckpt_paths)}, current-mp-size={world_size})")
         print(f"ckpt_dir: {ckpt_dir}")
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
-
-        if vision_only:
-            print("vision_only")
 
         model_args: ModelArgs = ModelArgs(
             max_seq_len=max_seq_len,
@@ -216,9 +215,9 @@ class Llama3:
                 total_len=total_len,
                 device=tokens.device,
             )
-            end_vis = time.perf_counter()
-            cprint(f"visual encoder latency: {end_vis - start_vis}", "blue")
-            return xattn_caches, cross_attention_masks, full_text_row_masked_out_mask
+            vis_time = time.perf_counter() - start_vis
+            cprint(f"visual encoder latency: {vis_time:.3f}", "blue")
+            return vis_time, xattn_caches, cross_attention_masks, full_text_row_masked_out_mask
         else:
             cprint(f"Need to be vision")
             exit(0)
@@ -268,9 +267,12 @@ class Llama3:
         is_vision = not isinstance(self.model, Transformer)
 
         # (taeklim): vision caches from image encoder
-        xattn_caches = interm_data[0].to("cuda:1")
-        cross_attention_masks = interm_data[1].to("cuda:1")
-        full_text_row_masked_out_mask = interm_data[2].to("cuda:1")
+#        xattn_caches = interm_data[0].to("cuda:1")
+#        cross_attention_masks = interm_data[1].to("cuda:1")
+#        full_text_row_masked_out_mask = interm_data[2].to("cuda:1")
+        xattn_caches = interm_data[0]
+        cross_attention_masks = interm_data[1]
+        full_text_row_masked_out_mask = interm_data[2]
 
         eos_reached = torch.tensor([False] * bsz)
         input_text_mask = tokens != pad_id
@@ -349,10 +351,10 @@ class Llama3:
             prev_pos = cur_pos
             if all(eos_reached):
                 break
-        end_text = time.perf_counter()
-        cprint(f"\ntext gen latency: {end_text - start_text}", "blue")
+        text_time = time.perf_counter() - start_text
+        cprint(f"\ntext gen latency: {text_time:.3f}", "blue")
 
-        return results
+        return text_time, results
 
 
     @torch.inference_mode()
@@ -410,7 +412,8 @@ class Llama3:
                 device=tokens.device,
             )
             end_vis = time.perf_counter()
-            cprint(f"visual encoder latency: {end_vis - start_vis}", "blue")
+            vis_time = end_vis - start_vis
+            cprint(f"visual encoder latency: {vis_time}", "blue")
 
         eos_reached = torch.tensor([False] * bsz)
         input_text_mask = tokens != pad_id
@@ -490,9 +493,10 @@ class Llama3:
             if all(eos_reached):
                 break
         end_text = time.perf_counter()
-        cprint(f"\ntext gen latency: {end_text - start_text}", "blue")
+        text_time = end_text - start_text
+        cprint(f"\ntext gen latency: {text_time}", "blue")
 
-        return results
+        return vis_time, text_time, results
 
 
     def vision_completion(
@@ -506,7 +510,7 @@ class Llama3:
     #) -> Generator[List[GenerationResult], None, None]:
     ):
         model_inputs = [self.formatter.encode_content(c) for c in contents]
-        xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = self.vision_generate(
+        vis_time, xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = self.vision_generate(
             model_inputs=model_inputs,
             temperature=temperature,
             top_p=top_p,
@@ -514,7 +518,7 @@ class Llama3:
             logprobs=logprobs,
             echo=echo,
         )
-        return xattn_caches, cross_attention_masks, full_text_row_masked_out_mask 
+        return vis_time, xattn_caches, cross_attention_masks, full_text_row_masked_out_mask
 
 
     def text_completion(
@@ -529,7 +533,7 @@ class Llama3:
     #) -> Generator[List[GenerationResult], None, None]:
     ):
         model_inputs = [self.formatter.encode_content(c) for c in contents]
-        result = self.text_generate(
+        text_time, result = self.text_generate(
             model_inputs=model_inputs,
             temperature=temperature,
             top_p=top_p,
@@ -538,7 +542,7 @@ class Llama3:
             echo=echo,
             interm_data=interm_data,
         )
-        return result
+        return text_time, result
 
     def completion(
         self,
@@ -551,7 +555,7 @@ class Llama3:
     #) -> Generator[List[GenerationResult], None, None]:
     ):
         model_inputs = [self.formatter.encode_content(c) for c in contents]
-        result = self.generate(
+        vis_time, text_time, result = self.generate(
             model_inputs=model_inputs,
             temperature=temperature,
             top_p=top_p,
@@ -559,19 +563,7 @@ class Llama3:
             logprobs=logprobs,
             echo=echo,
         )
-        return result
-
-#        for result in self.generate(
-#            model_inputs=model_inputs,
-#            temperature=temperature,
-#            top_p=top_p,
-#            max_gen_len=max_gen_len,
-#            logprobs=logprobs,
-#            echo=echo,
-#        ):
-#            yield result
-#            if all(r.finished for r in result):
-#                break
+        return vis_time, text_time, result
 
 
     def chat_completion(
