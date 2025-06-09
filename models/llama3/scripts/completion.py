@@ -43,7 +43,7 @@ def run_main(
     top_p: float = 0.9,
     max_seq_len: int = 512,
     max_batch_size: int = 4,
-    request_len: int = 50,
+    request_len: int = 10,
     world_size: Optional[int] = None,
     quantization_mode: Optional[str] = None,
 ):
@@ -72,6 +72,7 @@ def run_main(
     total_vis_time = 0
     total_text_time = 0
 
+    num_done = 0
     for content in interleaved_contents:
         #cprint(f"{content}", end="")
         batch = [content]
@@ -81,12 +82,15 @@ def run_main(
             temperature=temperature,
             top_p=top_p,
         )
-        total_vis_time += vis_time
-        total_text_time += text_time
+        if num_done != 0:
+            total_vis_time += vis_time
+            total_text_time += text_time
+        num_done += 1
 #        for token_result in results:
 #            cprint(token_result.text, color="yellow", end="")
-    print(f"Average vision latency {total_vis_time / request_len:.3f} sec")
-    print(f"Average text latency {total_text_time / request_len:.3f} sec")
+    print(num_done)
+    print(f"Average vision latency {total_vis_time / (num_done-1) / 1000:.3f} sec")
+    print(f"Average text latency {total_text_time / (num_done-1) / 1000:.3f} sec")
         
 
 def main():

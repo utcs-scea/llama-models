@@ -54,10 +54,12 @@ def run_vision(
     top_p: float = 0.9,
     max_seq_len: int = 512,
     max_batch_size: int = 4,
-    request_len: int = 50,
+    request_len: int = 10,
     world_size: Optional[int] = None,
     quantization_mode: Optional[str] = None,
     queue=None,
+    start_event=None,
+    end_event=None,
 ):
     vision_only = True
     generator = Llama3.build(
@@ -70,7 +72,6 @@ def run_vision(
         vision_only=vision_only,
     )
 
-    time.sleep(10)
     interleaved_contents = []
     if generator.args.vision_chunk_size > 0:
         with open(THIS_DIR / "../../resources/dog.jpg", "rb") as f:
@@ -85,10 +86,15 @@ def run_vision(
                 )
     assert(len(interleaved_contents) == request_len)
 
+    print("Waiting for start_event...")
+    start_event.wait()
+
     total_vis_time = 0
     num_done = 0
-    for content in interleaved_contents:
-        #cprint(f"{content}", end="")
+    #for content in interleaved_contents:
+    content = interleaved_contents[0]
+    #for num_done in range(request_len):
+    while True:
         batch = [content]
 
         vis_time, xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = generator.vision_completion(
@@ -96,17 +102,14 @@ def run_vision(
             temperature=temperature,
             top_p=top_p,
         )
-        interm_data = (xattn_caches, cross_attention_masks,
-                       full_text_row_masked_out_mask)
-        queue.put(interm_data)
-        total_vis_time += vis_time
-        num_done += 1
-        print(f"Req {num_done}, Cur vision latency {vis_time:.3f} sec, Avg vision latency {total_vis_time / num_done:.3f} sec")
+        if num_done != 0:
+            total_vis_time += vis_time
+        num_done += 1 
+        #print(f"Req {num_done}, Cur vision latency {vis_time / 1000:.3f} sec")
+        if end_event.is_set():
+            break
 
-    while running:
-        # Waiting until 
-        time.sleep(1)
-    print(f"Average vision latency {total_vis_time / request_len:.3f} sec")
+    print(f"Average vision latency {total_vis_time / (num_done-1) / 1000:.3f} sec")
 
 
 def run_text(
@@ -115,10 +118,12 @@ def run_text(
     top_p: float = 0.9,
     max_seq_len: int = 512,
     max_batch_size: int = 4,
-    request_len: int = 50,
+    request_len: int = 10,
     world_size: Optional[int] = None,
     quantization_mode: Optional[str] = None,
     queue=None,
+    start_event=None,
+    end_event=None,
 ):
     vision_only = False
     generator = Llama3.build(
@@ -145,30 +150,34 @@ def run_text(
             )
     assert(len(interleaved_contents) == request_len)
 
+    content = interleaved_contents[0]
+    batch = [content]
+    vis_time, xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = generator.vision_completion(
+        batch,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    interm_data = (xattn_caches, cross_attention_masks, full_text_row_masked_out_mask)
+
     num_done = 0
     total_text_time = 0
-    while True:
-        if queue.qsize(): 
-            interm_data = queue.get()
-            content = interleaved_contents[num_done]
-            batch = [content]
-
-            text_time, results = generator.text_completion(
-                batch,
-                temperature=temperature,
-                top_p=top_p,
-                interm_data=interm_data,
-            )
-            num_done += 1
+    start_event.set()
+    for i in range(request_len):
+        text_time, results = generator.text_completion(
+            batch,
+            temperature=temperature,
+            top_p=top_p,
+            interm_data=interm_data,
+        )
+        if num_done != 0:
             total_text_time += text_time
-            del interm_data
-            print(f"Req {num_done}, Cur text lat {text_time:.3f} sec, Avg text lat {total_text_time / num_done:.3f} sec")
-        if num_done == request_len:
-            break
+        num_done += 1
+        #print(f"Req {num_done}, Cur text lat {text_time / 1000:.3f} sec")
 
 #        for token_result in results:
 #            cprint(token_result.text, color="yellow", end="")
-    print(f"Average text latency {total_text_time / request_len:.3f} sec")
+    end_event.set()
+    print(f"Average text latency {total_text_time / (num_done-1) / 1000:.3f} sec")
 
 
 def main():
@@ -177,14 +186,21 @@ def main():
     signal.signal(signal.SIGTERM, handle_exit)  # Handle termination signal
 
     set_start_method('spawn', force=True)
+
+    start_event = Event()
+    end_event = Event()
     q = Queue()
 
     p1 = Process(target=run_vision,
                 kwargs={'ckpt_dir': '/home/kimtaekl/.llama/checkpoints/Llama3.2-11B-Vision',
-                         'queue': q})
+                        'queue': q,
+                        'start_event': start_event,
+                        'end_event': end_event})
     p2 = Process(target=run_text,
                 kwargs={'ckpt_dir': '/home/kimtaekl/.llama/checkpoints/Llama3.2-11B-Vision',
-                         'queue': q})
+                        'queue': q,
+                        'start_event': start_event,
+                        'end_event': end_event})
     p1.start()
     p2.start()
 

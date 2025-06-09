@@ -203,9 +203,13 @@ class Llama3:
 
         is_vision = not isinstance(self.model, Transformer)
 
+        start_vis_cuda = torch.cuda.Event(enable_timing=True)
+        end_vis_cuda = torch.cuda.Event(enable_timing=True)
+
         if is_vision:
             # (taeklim): Measuring vision encoder latency
             start_vis = time.perf_counter()
+            start_vis_cuda.record()
             images = [inp.vision.images if inp.vision is not None else [] for inp in model_inputs]
             mask = [inp.vision.mask if inp.vision is not None else [] for inp in model_inputs]
 
@@ -215,8 +219,11 @@ class Llama3:
                 total_len=total_len,
                 device=tokens.device,
             )
-            vis_time = time.perf_counter() - start_vis
-            cprint(f"visual encoder latency: {vis_time:.3f}", "blue")
+            end_vis_cuda.record()
+            torch.cuda.synchronize()
+            vis_time = start_vis_cuda.elapsed_time(end_vis_cuda)
+            #vis_time = time.perf_counter() - start_vis
+            cprint(f"visual encoder latency: {vis_time:.3f} ms", "blue")
             return vis_time, xattn_caches, cross_attention_masks, full_text_row_masked_out_mask
         else:
             cprint(f"Need to be vision")
@@ -282,8 +289,11 @@ class Llama3:
         prev_pos = 0
 
         # (taeklim): Measuring text generation latency
+        start_text_cuda = torch.cuda.Event(enable_timing=True)
+        end_text_cuda = torch.cuda.Event(enable_timing=True)
         start_text = time.perf_counter()
-        #print(f"before forward {min_prompt_len}, {total_len}")
+        start_text_cuda.record()
+
         results = []
         for cur_pos in range(min_prompt_len, total_len):
             if is_vision:
@@ -351,8 +361,12 @@ class Llama3:
             prev_pos = cur_pos
             if all(eos_reached):
                 break
-        text_time = time.perf_counter() - start_text
-        cprint(f"\ntext gen latency: {text_time:.3f}", "blue")
+
+        end_text_cuda.record()
+        torch.cuda.synchronize()
+        text_time = start_text_cuda.elapsed_time(end_text_cuda)
+        #text_time = time.perf_counter() - start_text
+        cprint(f"\ntext gen latency: {text_time:.3f} ms", "blue")
 
         return text_time, results
 
@@ -398,10 +412,13 @@ class Llama3:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
         is_vision = not isinstance(self.model, Transformer)
+        start_vis_cuda = torch.cuda.Event(enable_timing=True)
+        end_vis_cuda = torch.cuda.Event(enable_timing=True)
 
         if is_vision:
             # (taeklim): Measuring vision encoder latency
             start_vis = time.perf_counter()
+            start_vis_cuda.record()
             images = [inp.vision.images if inp.vision is not None else [] for inp in model_inputs]
             mask = [inp.vision.mask if inp.vision is not None else [] for inp in model_inputs]
 
@@ -411,9 +428,12 @@ class Llama3:
                 total_len=total_len,
                 device=tokens.device,
             )
-            end_vis = time.perf_counter()
-            vis_time = end_vis - start_vis
-            cprint(f"visual encoder latency: {vis_time}", "blue")
+            #end_vis = time.perf_counter()
+            #vis_time = end_vis - start_vis
+            end_vis_cuda.record()
+            torch.cuda.synchronize()
+            vis_time = start_vis_cuda.elapsed_time(end_vis_cuda)
+            cprint(f"visual encoder latency: {vis_time:.3f} ms", "blue")
 
         eos_reached = torch.tensor([False] * bsz)
         input_text_mask = tokens != pad_id
@@ -423,7 +443,11 @@ class Llama3:
         prev_pos = 0
 
         # (taeklim): Measuring text generation latency
+        start_text_cuda = torch.cuda.Event(enable_timing=True)
+        end_text_cuda = torch.cuda.Event(enable_timing=True)
+
         start_text = time.perf_counter()
+        start_text_cuda.record()
         #print(f"before forward {min_prompt_len}, {total_len}")
         results = []
         for cur_pos in range(min_prompt_len, total_len):
@@ -493,8 +517,11 @@ class Llama3:
             if all(eos_reached):
                 break
         end_text = time.perf_counter()
-        text_time = end_text - start_text
-        cprint(f"\ntext gen latency: {text_time}", "blue")
+        end_text_cuda.record()
+        torch.cuda.synchronize()
+        #text_time = end_text - start_text
+        text_time = start_text_cuda.elapsed_time(end_text_cuda)
+        cprint(f"text gen latency: {text_time:.3f} ms", "blue")
 
         return vis_time, text_time, results
 
